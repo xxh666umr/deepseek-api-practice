@@ -37,6 +37,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from common import MODEL, configure_stdout, explain_error, load_env, require_key
+from orders_db import lookup as lookup_order
 
 ROOT = Path(__file__).parent
 PAGE = ROOT / "static" / "ticket.html"
@@ -74,7 +75,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_order_status",
-            "description": "按订单号查询物流状态",
+            "description": "按订单号查询订单与物流状态（查本地订单库）",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -88,16 +89,18 @@ TOOLS = [
 
 
 def get_order_status(order_id: str) -> str:
-    """示例数据。真实项目里这里应该查订单库或物流接口。"""
-    return json.dumps(
-        {
-            "order_id": order_id,
-            "status": "已打包待揽收",
-            "carrier": "顺丰",
-            "updated": "今天 09:20",
-        },
-        ensure_ascii=False,
-    )
+    """查订单库。查不到就明确说查不到，绝不编一个状态出来。
+
+    真实项目里把 lookup_order 换成调订单服务的 HTTP 请求即可，
+    返回值形状保持一致（found + 字段），上层逻辑不用动。
+    """
+    record = lookup_order(order_id)
+    if not record:
+        return json.dumps(
+            {"found": False, "order_id": order_id, "message": "订单库里没有这个订单号"},
+            ensure_ascii=False,
+        )
+    return json.dumps({"found": True, **record}, ensure_ascii=False)
 
 
 TOOL_IMPL = {"get_order_status": get_order_status}
@@ -346,6 +349,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.emit({"delta": delta})
 
 
+def port_in_use(port: int) -> bool:
+    """端口上是否已经有程序在监听。
+
+    为什么需要这个检查：Windows 的 SO_REUSEADDR 允许两个进程绑同一个端口，
+    第二个**不会报错**——结果是你的代码明明改了，页面行为却是旧进程的。
+    这个坑踩过一次，代价是二十分钟的困惑。
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
 def main() -> int:
     configure_stdout()
     load_env()
@@ -355,6 +372,13 @@ def main() -> int:
         index = sys.argv.index("--port")
         if index + 1 < len(sys.argv):
             port = int(sys.argv[index + 1])
+
+    if port_in_use(port):
+        print(f"[错误] 端口 {port} 已经有程序在监听。")
+        print("       Windows 允许两个进程绑同一端口，第二个不会报错，")
+        print("       但你的请求会被旧进程接走——表现就是「代码改了却没生效」。")
+        print(f"       换个端口：python {Path(__file__).name} --port {port + 1}")
+        return 1
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"工单助手已启动：http://127.0.0.1:{port}")

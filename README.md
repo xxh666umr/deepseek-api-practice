@@ -19,7 +19,7 @@
 | 步骤 | 做什么 | 靠什么 |
 |---|---|---|
 | 抽取 | 从留言里取出姓名、电话、订单号、商品、问题、紧急度、是否要求退款 | JSON 模式 + 代码校验 |
-| 查证 | 有订单号就调用工具查物流；没有就不编 | 工具调用（function calling） |
+| 查证 | 有订单号就调用工具查订单库；查不到就明说 | 工具调用 + SQLite |
 | 起草 | 结合字段和查证结果，写 120 字以内的回复草稿 | 流式输出（SSE） |
 
 ## 跑起来
@@ -29,6 +29,7 @@ git clone https://github.com/xxh666umr/deepseek-api-practice.git
 cd deepseek-api-practice
 python -m pip install openai
 cp .env.example .env          # 填入下面申请的 Key
+python orders_db.py --seed    # 建本地订单库，写入 3 条示例订单
 python 09_ticket_assistant.py
 ```
 
@@ -67,6 +68,7 @@ DEEPSEEK_API_KEY=sk-xxxxxxxx
 | 输入 | 表现 |
 |---|---|
 | 忘了订单号 | 不调用工具，草稿里向客户索要订单号，**不编造物流** |
+| 订单号库里查不到 | 工具返回 `found: false`，草稿明说没查到，请客户补充信息 |
 | 空输入 | `400 message 必须是非空字符串` |
 | 口令错误 | `401 需要访问口令` |
 | 超过限流 | `429 太频繁了` |
@@ -112,6 +114,7 @@ SSE 事件：{"stage"} / {"fields"} / {"tool"} / {"delta"} / {"usage"}
 
 ```
 09_ticket_assistant.py   应用后端（HTTP + SSE，标准库）
+orders_db.py             订单库（SQLite）：建表、seed、按订单号精确查询
 static/ticket.html       页面
 common.py                共用：读 Key、建 client、流式封装、报错翻译
 01_first_call.py …       底层模块，每个演示一个能力（见下）
@@ -140,10 +143,10 @@ tests/test_core.py       离线测试（22 个）
 python -B -m unittest discover -s tests -v
 ```
 
-22 个用例，**离线、不花钱、不需要 Key**，跑一遍不到 1 秒：
+27 个用例，**离线、不花钱、不需要 Key**，跑一遍不到 1 秒：
 
 ```
-Ran 22 tests in 0.754s
+Ran 27 tests in 0.825s
 OK
 ```
 
@@ -156,6 +159,7 @@ OK
 | `08_app` | 历史裁剪：只留最近 N 条，且必须从 `user` 开始 |
 | `04_retry` | `Retry-After` 优先、上限封顶、指数退避与抖动范围 |
 | `common` | 非法代理对在入口被清掉，不会留到发请求时才炸 |
+| `orders_db` / 工具 | 查得到返回记录、查不到返回 `None`、少一位数字不能命中、状态可推进 |
 | `09_ticket_assistant` | 工具返回值是可解析 JSON，且带上入参订单号 |
 
 **不测什么**：真实模型调用。那部分依赖网络和模型行为，断言不稳定，靠手跑验证，记录在 [`docs/STEPS.md`](docs/STEPS.md)。CI 里也不需要任何密钥。
@@ -166,7 +170,7 @@ OK
 
 - **单进程、状态在内存**：重启就丢限流计数，多开实例不共享
 - **测试只覆盖纯逻辑**：模型调用、HTTP 层、页面都没测，那部分靠手跑
-- **没有数据库**：订单数据是写死的示例
+- **数据库是本地 SQLite**：数据由 `seed` 脚本生成，不是真实订单系统
 - **无 HTTPS**：口令是明文传输，只能本地或内网用
 - **限流按来源地址**：同一出口 NAT 后面的人会互相影响
 

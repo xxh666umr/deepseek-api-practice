@@ -11,8 +11,13 @@ import_module("04_retry") 能正常工作。
 """
 
 import importlib
+import json
+import os
+import shutil
 import sys
+import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,6 +26,20 @@ sys.path.insert(0, str(ROOT))
 
 def load(name):
     return importlib.import_module(name)
+
+
+def make_temp_dir() -> Path:
+    """建一个临时目录并返回路径。
+
+    用普通 mkdir 而不是 tempfile.mkdtemp：后者在 Windows 上会建出带受限权限的目录，
+    某些受限环境里连自己都写不进去，表现就是 sqlite 的 "unable to open database file"。
+    系统临时目录不可写时，可以用 TEST_TMPDIR 指到别处。
+    """
+    base = Path(os.environ.get("TEST_TMPDIR") or tempfile.gettempdir())
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / f"test-{uuid.uuid4().hex[:10]}"
+    target.mkdir()
+    return target
 
 
 GOOD_FIELDS = {
@@ -183,19 +202,67 @@ class SanitizeTest(unittest.TestCase):
         cleaned.encode("utf-8")  # 不再抛 UnicodeEncodeError 即通过
 
 
-class ToolImplTest(unittest.TestCase):
-    """09 的工具：返回值必须是能解析的 JSON，且带上入参的订单号。"""
+class OrderDbTest(unittest.TestCase):
+    """订单库：查得到就返回记录，查不到就返回 None，不能抛异常。"""
 
     def setUp(self):
+        self.tmp = make_temp_dir()
+        self.db = self.tmp / "orders.db"
+        self.mod = load("orders_db")
+        self.mod.seed(self.db)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_seeded_order_found(self):
+        record = self.mod.lookup("A20261015001", self.db)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["carrier"], "顺丰")
+        self.assertEqual(record["status"], "已打包待揽收")
+
+    def test_missing_order_returns_none(self):
+        self.assertIsNone(self.mod.lookup("A00000000000", self.db))
+
+    def test_exact_match_only(self):
+        # 少一位数字不能命中——真实系统里这关系到"别把别人的订单给客户看"
+        self.assertIsNone(self.mod.lookup("A2026101500", self.db))
+
+    def test_advance_changes_status(self):
+        self.assertTrue(self.mod.advance("A20261015003", "派送中", "2026-10-26 11:00", self.db))
+        self.assertEqual(self.mod.lookup("A20261015003", self.db)["status"], "派送中")
+        self.assertFalse(self.mod.advance("NOPE", "x", "y", self.db))
+
+
+class ToolImplTest(unittest.TestCase):
+    """09 的工具：查得到要带数据，查不到要明说，绝不能编一个状态。"""
+
+    def setUp(self):
+        self.tmp = make_temp_dir()
+        self.db = self.tmp / "orders.db"
+        load("orders_db").seed(self.db)
+
+        self._old = os.environ.get("ORDERS_DB")
+        os.environ["ORDERS_DB"] = str(self.db)
         self.mod = load("09_ticket_assistant")
 
-    def test_returns_json_with_order_id(self):
-        import json
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("ORDERS_DB", None)
+        else:
+            os.environ["ORDERS_DB"] = self._old
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
-        result = self.mod.get_order_status("A20261015001")
-        data = json.loads(result)
-        self.assertEqual(data["order_id"], "A20261015001")
+    def test_found_order(self):
+        data = json.loads(self.mod.get_order_status("A20261015001"))
+        self.assertTrue(data["found"])
+        self.assertEqual(data["carrier"], "顺丰")
         self.assertIn("status", data)
+
+    def test_missing_order_is_reported_not_invented(self):
+        data = json.loads(self.mod.get_order_status("A00000000000"))
+        self.assertFalse(data["found"])
+        self.assertNotIn("status", data)
+        self.assertIn("message", data)
 
     def test_tool_registered(self):
         self.assertIn("get_order_status", self.mod.TOOL_IMPL)
