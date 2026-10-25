@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工单助手 · DeepSeek</title>
+<style>
+  :root {
+    --bg: #101319;
+    --panel: #171b23;
+    --panel2: #1d222c;
+    --line: #2a3140;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #4a7dff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.65 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main {
+    display: grid;
+    grid-template-columns: minmax(320px, 1fr) minmax(380px, 1.2fr);
+    gap: 20px;
+    padding: 20px 24px 32px;
+    align-items: start;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .card h2 {
+    font-size: 13px;
+    margin: 0 0 10px;
+    color: var(--muted);
+    font-weight: 600;
+    letter-spacing: .02em;
+    text-transform: uppercase;
+  }
+  textarea {
+    width: 100%;
+    height: 200px;
+    resize: vertical;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--panel2);
+    color: var(--text);
+    font: inherit;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 10px; margin-top: 12px; align-items: center; }
+  button {
+    border: 0;
+    border-radius: 9px;
+    padding: 9px 18px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    background: var(--accent);
+    color: #fff;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  button.ghost {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    font-weight: 400;
+    font-size: 13px;
+    padding: 6px 12px;
+  }
+  button.ghost:hover { color: var(--text); border-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12px; }
+  #fields { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 14px; }
+  #fields .k { color: var(--muted); }
+  #fields .v { word-break: break-all; }
+  .pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 99px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .pill.high { background: rgba(248,81,73,.15); color: var(--err); }
+  .pill.medium { background: rgba(210,153,34,.15); color: var(--warn); }
+  .pill.low { background: rgba(63,185,80,.15); color: var(--ok); }
+  #tools { font-size: 13px; color: var(--muted); display: grid; gap: 8px; }
+  #tools .item {
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 12px;
+    color: #a9b1c4;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  #draft {
+    min-height: 96px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.75;
+  }
+  #status { padding: 0 24px 24px; color: var(--muted); font-size: 12px; min-height: 18px; }
+  .err { color: var(--err); }
+  .stack { display: grid; gap: 20px; }
+  .cursor { color: var(--accent); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>工单助手</h1>
+    <span class="sub">留言 → 结构化字段 → 查订单 → 回复草稿</span>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>客户留言</h2>
+      <textarea id="input">张伟，电话 138-0000-1234，上周三在你们官网买的 27 寸显示器，订单号 A20261015001，到现在还没发货，再不发货我就退款，今天之内必须给答复。</textarea>
+      <div class="row">
+        <button id="run">分析这单</button>
+        <button class="ghost" id="sample">换一个例子</button>
+      </div>
+      <div class="row"><span class="hint" id="hint">三秒左右出结果，会调用模型两次。</span></div>
+    </section>
+
+    <div class="stack">
+      <section class="card">
+        <h2>抽取结果</h2>
+        <div id="fields"><span class="hint">还没有分析</span></div>
+      </section>
+
+      <section class="card">
+        <h2>工具调用</h2>
+        <div id="tools"><span class="hint">没有调用</span></div>
+      </section>
+
+      <section class="card">
+        <h2>回复草稿</h2>
+        <div id="draft"></div>
+        <div class="row">
+          <button class="ghost" id="copy">复制草稿</button>
+          <span class="hint" id="usage"></span>
+        </div>
+      </section>
+    </div>
+  </main>
+  <div id="status"></div>
+
+<script>
+const inputEl = document.getElementById('input');
+const runBtn = document.getElementById('run');
+const sampleBtn = document.getElementById('sample');
+const copyBtn = document.getElementById('copy');
+const fieldsEl = document.getElementById('fields');
+const toolsEl = document.getElementById('tools');
+const draftEl = document.getElementById('draft');
+const statusEl = document.getElementById('status');
+const usageEl = document.getElementById('usage');
+
+const LABELS = {
+  customer: '姓名', contact: '联系方式', order_id: '订单号',
+  product: '商品', issue: '问题', urgency: '紧急度', wants_refund: '要求退款'
+};
+
+const SAMPLES = [
+  '张伟，电话 138-0000-1234，上周三在你们官网买的 27 寸显示器，订单号 A20261015001，到现在还没发货，再不发货我就退款，今天之内必须给答复。',
+  '你好，我叫李娜，邮箱 lina@example.com。昨天收到的键盘（订单 A20261015002）有个按键失灵，想问下能不能换货，不着急，方便的时候回我就行。',
+  '我是王强，13800001235。上周买的鼠标一直没收到，订单号我忘了，你们帮我查一下吧，挺急的。'
+];
+let sampleIndex = 0;
+
+function esc(text) {
+  return String(text === null || text === undefined ? '—' : text);
+}
+
+function renderFields(fields) {
+  fieldsEl.innerHTML = '';
+  for (const key of Object.keys(LABELS)) {
+    const k = document.createElement('div');
+    k.className = 'k';
+    k.textContent = LABELS[key];
+    const v = document.createElement('div');
+    v.className = 'v';
+    if (key === 'urgency') {
+      const pill = document.createElement('span');
+      pill.className = 'pill ' + fields[key];
+      pill.textContent = fields[key];
+      v.appendChild(pill);
+    } else if (key === 'wants_refund') {
+      v.textContent = fields[key] ? '是' : '否';
+    } else {
+      v.textContent = esc(fields[key]);
+    }
+    fieldsEl.append(k, v);
+  }
+}
+
+async function run() {
+  const message = inputEl.value.trim();
+  if (!message) return;
+
+  runBtn.disabled = true;
+  draftEl.textContent = '';
+  fieldsEl.innerHTML = '<span class="hint">抽取中…</span>';
+  toolsEl.innerHTML = '<span class="hint">等待…</span>';
+  usageEl.textContent = '';
+  statusEl.className = '';
+  statusEl.textContent = '处理中…';
+
+  const started = performance.now();
+  let draft = '';
+  let tools = 0;
+  let usageIn = 0;
+  let usageOut = 0;
+
+  try {
+    const response = await fetch('/triage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message })
+    });
+
+    if (response.status === 401) throw new Error('需要访问口令（服务端设了 ACCESS_TOKEN）');
+    if (response.status === 429) throw new Error('太频繁了，等一分钟再试');
+    if (!response.ok) throw new Error('HTTP ' + response.status + '：' + (await response.text()).slice(0, 160));
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        const body = line.slice(5).trim();
+        if (body === '[DONE]') continue;
+
+        const event = JSON.parse(body);
+
+        if (event.stage === 'extract') {
+          statusEl.textContent = '正在抽取字段…';
+        } else if (event.stage === 'draft') {
+          statusEl.textContent = '正在写回复…';
+          toolsEl.querySelector('.hint')?.remove();
+        } else if (event.fields) {
+          renderFields(event.fields);
+        } else if (event.tool) {
+          tools += 1;
+          const item = document.createElement('div');
+          item.className = 'item';
+          item.textContent = event.tool.name + ' ' + event.tool.args + '\n→ ' + event.tool.result;
+          toolsEl.querySelector('.hint')?.remove();
+          toolsEl.appendChild(item);
+        } else if (event.delta) {
+          draft += event.delta;
+          draftEl.textContent = draft;
+        } else if (event.usage) {
+          usageIn += event.usage.in || 0;
+          usageOut += event.usage.out || 0;
+          usageEl.textContent = '输入 ' + usageIn + ' / 输出 ' + usageOut + ' tokens';
+        } else if (event.error) {
+          throw new Error(event.error);
+        }
+      }
+    }
+
+    const seconds = ((performance.now() - started) / 1000).toFixed(2);
+    statusEl.textContent = '完成，用时 ' + seconds + 's，调用工具 ' + tools + ' 次';
+    if (!draft) draftEl.innerHTML = '<span class="hint">没有生成草稿</span>';
+  } catch (err) {
+    statusEl.className = 'err';
+    statusEl.textContent = '出错了：' + err.message;
+    if (!draft) draftEl.innerHTML = '<span class="err">' + err.message + '</span>';
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+runBtn.addEventListener('click', run);
+sampleBtn.addEventListener('click', () => {
+  sampleIndex = (sampleIndex + 1) % SAMPLES.length;
+  inputEl.value = SAMPLES[sampleIndex];
+});
+copyBtn.addEventListener('click', async () => {
+  if (!draftEl.textContent) return;
+  try {
+    await navigator.clipboard.writeText(draftEl.textContent);
+    statusEl.textContent = '草稿已复制';
+  } catch {
+    statusEl.textContent = '浏览器不让复制，手动选吧';
+  }
+});
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    run();
+  }
+});
+</script>
+</body>
+</html>
