@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek 对话（服务端会话版）</title>
+<style>
+  :root {
+    --bg: #12141a;
+    --panel: #1a1d26;
+    --line: #2a2f3c;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #4a7dff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.65 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .hint { color: var(--muted); font-size: 12px; }
+  header .spacer { flex: 1; }
+  button.ghost {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    border-radius: 8px;
+    padding: 6px 12px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  button.ghost:hover { color: var(--text); border-color: var(--accent); }
+  #authbar {
+    display: none;
+    gap: 8px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--line);
+    background: #1c1f2a;
+  }
+  #authbar input {
+    flex: 1;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+  }
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg { display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .body {
+    max-width: min(760px, 82%);
+    padding: 10px 14px;
+    border-radius: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .user .body { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .assistant .body { background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .err .body { background: #3a1d22; border: 1px solid #6b2b35; color: #ffb4bf; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  form {
+    display: flex;
+    gap: 10px;
+    padding: 14px 20px 18px;
+    border-top: 1px solid var(--line);
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+    height: 52px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--text);
+    font: inherit;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  button#send {
+    width: 88px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button#send:disabled { opacity: .45; cursor: default; }
+  #status { padding: 0 20px 12px; color: var(--muted); font-size: 12px; min-height: 18px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>DeepSeek 对话</h1>
+    <span class="hint" id="meta">连接中…</span>
+    <span class="spacer"></span>
+    <button class="ghost" id="reset">清空对话</button>
+  </header>
+
+  <div id="authbar">
+    <input id="token" type="password" placeholder="输入访问口令（服务端配置的 ACCESS_TOKEN）">
+    <button class="ghost" id="saveToken">保存</button>
+  </div>
+
+  <main id="log"></main>
+
+  <form id="form">
+    <textarea id="input" placeholder="输入内容，Enter 发送，Shift+Enter 换行"></textarea>
+    <button id="send" type="submit">发送</button>
+  </form>
+  <div id="status"></div>
+
+<script>
+const logEl = document.getElementById('log');
+const form = document.getElementById('form');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const statusEl = document.getElementById('status');
+const metaEl = document.getElementById('meta');
+const authbar = document.getElementById('authbar');
+const tokenInput = document.getElementById('token');
+const resetBtn = document.getElementById('reset');
+
+const TOKEN_KEY = 'practice_token';
+let authRequired = false;
+
+function getToken() {
+  return sessionStorage.getItem(TOKEN_KEY) || '';
+}
+
+function addBubble(role, text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + role;
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.textContent = text || '';
+  wrap.appendChild(body);
+  logEl.appendChild(wrap);
+  logEl.scrollTop = logEl.scrollHeight;
+  return body;
+}
+
+function addError(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg err';
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.textContent = text;
+  wrap.appendChild(body);
+  logEl.appendChild(wrap);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(text) { statusEl.textContent = text || ''; }
+
+// 历史存在服务端，这里只问一下"我聊过几条"
+async function refreshMeta() {
+  try {
+    const res = await fetch('/api/me');
+    const data = await res.json();
+    authRequired = data.auth_required;
+    authbar.style.display = authRequired && !getToken() ? 'flex' : 'none';
+    metaEl.textContent = '模型 ' + data.model + ' · 历史 ' + data.history + ' 条';
+  } catch (err) {
+    metaEl.textContent = '连不上服务端';
+  }
+}
+
+async function send(text) {
+  const replyBody = addBubble('assistant', '');
+  const cursor = document.createElement('span');
+  cursor.textContent = '▍';
+  replyBody.appendChild(cursor);
+
+  sendBtn.disabled = true;
+  input.disabled = true;
+  setStatus('正在生成…');
+
+  const started = performance.now();
+  let answer = '';
+  let usage = null;
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = getToken();
+    if (token) headers['X-Access-Token'] = token;
+
+    const response = await fetch('/chat', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ message: text })
+    });
+
+    if (response.status === 401) {
+      authbar.style.display = 'flex';
+      tokenInput.focus();
+      throw new Error('需要访问口令。填好后重新发送。');
+    }
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error('HTTP ' + response.status + '：' + detail.slice(0, 200));
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+
+        const event = JSON.parse(payload);
+        if (event.delta) {
+          answer += event.delta;
+          replyBody.textContent = answer;
+          replyBody.appendChild(cursor);
+          logEl.scrollTop = logEl.scrollHeight;
+        } else if (event.usage) {
+          usage = event.usage;
+        } else if (event.error) {
+          throw new Error(event.error);
+        }
+      }
+    }
+
+    cursor.remove();
+    if (!answer) replyBody.textContent = '（没有收到内容）';
+
+    const seconds = ((performance.now() - started) / 1000).toFixed(2);
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = usage
+      ? '用时 ' + seconds + 's · 输入 ' + usage.in + ' / 输出 ' + usage.out + ' tokens'
+      : '用时 ' + seconds + 's';
+    replyBody.parentElement.appendChild(meta);
+    setStatus('');
+  } catch (err) {
+    cursor.remove();
+    replyBody.parentElement.remove();
+    addError('出错了：' + err.message);
+    setStatus('');
+  } finally {
+    sendBtn.disabled = false;
+    input.disabled = false;
+    input.focus();
+    refreshMeta();
+  }
+}
+
+form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  addBubble('user', text);
+  send(text);
+});
+
+input.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    form.requestSubmit();
+  }
+});
+
+document.getElementById('saveToken').addEventListener('click', () => {
+  sessionStorage.setItem(TOKEN_KEY, tokenInput.value.trim());
+  authbar.style.display = 'none';
+  setStatus('口令已保存到本次标签页（sessionStorage）');
+});
+
+resetBtn.addEventListener('click', async () => {
+  const headers = { 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers['X-Access-Token'] = token;
+  try {
+    await fetch('/reset', { method: 'POST', headers, body: '{}' });
+    logEl.innerHTML = '';
+    addBubble('assistant', '对话已清空，服务端也不记得你了。');
+    refreshMeta();
+  } catch (err) {
+    addError('清空失败：' + err.message);
+  }
+});
+
+refreshMeta();
+input.focus();
+</script>
+</body>
+</html>

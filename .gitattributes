@@ -1,0 +1,2 @@
+# 统一换行符，避免 Windows / macOS 协作时整个文件都显示成改动
+* text=auto
