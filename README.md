@@ -118,8 +118,8 @@ orders_db.py             订单库（SQLite）：建表、seed、按订单号精
 static/ticket.html       页面
 common.py                共用：读 Key、建 client、流式封装、报错翻译
 01_first_call.py …       底层模块，每个演示一个能力（见下）
-docs/STEPS.md            逐步笔记：每步的实测输出、坑、报错对照
-tests/test_core.py       离线测试（22 个）
+docs/STEPS.md            逐步笔记 + 两次真实排查记录（端口被占、临时目录权限）
+tests/test_core.py       离线测试（27 个）
 .github/workflows/       每次 push 自动跑测试
 .env.example             配置模板
 ```

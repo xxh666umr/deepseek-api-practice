@@ -435,3 +435,105 @@ MAX_HISTORY=12          # 每次最多带多少条历史
 3. 给 06 加一个 **`get_current_date` 工具**，让模型自己解决"明天是哪天"。
 4. 做一次**成本核算**：同一任务分别用 `deepseek-flash` 和 `deepseek-v4-pro` 跑，比较价格与质量。
 5. **部署**：Nginx 反代 + HTTPS + 按 IP 限流，再上服务器。现在的口令是明文、会话在内存里，只适合本地。
+
+
+---
+
+## 排查记录：两次「代码改了但没生效」
+
+这两次都不是代码逻辑错，是运行环境的问题。记下来，因为这类问题不写下来，下次还是不会定位。
+
+### 一、页面显示的还是旧数据
+
+**现象**：把 `get_order_status` 从「返回写死数据」改成「查 SQLite」之后，页面上的工具调用仍然返回：
+
+```json
+{"order_id": "A202610999999", "status": "已打包待揽收", "carrier": "顺丰", "updated": "今天 09:20"}
+```
+
+新代码应该返回 `{"found": true, "waybill": ...}`，而且 `A202610999999` 这个号根本不在库里——它却给了一个状态。
+
+**第一步：先怀疑文件，别急着怀疑代码。**
+
+```powershell
+Select-String -Path 09_ticket_assistant.py -Pattern 'lookup_order|found'
+(Get-Item 09_ticket_assistant.py).LastWriteTime
+```
+
+结果：`lookup_order` 在第 97 行，修改时间 01:05:49。**文件是新的。**
+
+**第二步：那就是进程。** 查谁在监听 8030：
+
+```powershell
+netstat -ano | Select-String ':8030' | Select-String 'LISTENING'
+```
+
+```
+TCP  127.0.0.1:8030  0.0.0.0:0  LISTENING  33772
+TCP  127.0.0.1:8030  0.0.0.0:0  LISTENING  44572
+```
+
+**两个进程在听同一个端口。**
+
+为什么第二个没报 `address already in use`？因为 Windows 的 `SO_REUSEADDR` 语义比 Linux 宽松，Python 的 `socketserver` 又默认 `allow_reuse_address = 1`，所以第二次绑定不会失败。但它并不能抢走连接——旧进程仍然在接。
+
+**第三步：查启动时间。**
+
+```powershell
+Get-Process -Id 33772 | Select-Object StartTime
+```
+
+33772 启动于 **00:57:25**，代码是 **01:05:49** 才改的。旧进程比新代码还早 8 分钟，它跑的就是老代码。
+
+**根因**：后台任务杀掉时只结束了外层进程，**Python 子进程活了下来**，一直占着端口。这种「僵尸服务」在开发里非常常见。
+
+**处理**（要在普通终端里做，受限环境里 `taskkill` 会被拒绝）：
+
+```powershell
+taskkill /F /PID 33772
+```
+
+**预防**：给应用加了启动检查。
+
+```python
+def port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+```
+
+端口被占就直接拒绝启动并提示换端口。**宁可启动失败，也不要悄悄跑旧代码。**
+
+### 二、测试全挂：unable to open database file
+
+**现象**：加了 SQLite 订单库之后，7 个用例同时报：
+
+```
+sqlite3.OperationalError: unable to open database file
+```
+
+**排查**：先做对照实验，普通 `mkdir` 的目录和 `tempfile.mkdtemp()` 的目录各建一个 SQLite：
+
+```python
+plain = ws / ("plain-" + uuid.uuid4().hex[:6])
+plain.mkdir()
+tempfile.mkdtemp(dir=ws)
+```
+
+结果：`mkdir` 的目录能建库，`mkdtemp` 的不能。
+
+**根因**：`tempfile.mkdtemp()` 在 Windows 上会给目录设置受限的访问控制，某些受限环境下连创建者自己都写不进去。
+
+**处理**：测试改用普通目录 + `uuid` 命名，结束时 `shutil.rmtree(ignore_errors=True)`；同时支持 `TEST_TMPDIR`，把临时目录指到可写的位置。
+
+**教训**：CI 跑在 Linux 上，这个坑**永远不会在 CI 里暴露**——只有本机撞到才看得见。「CI 绿了」不等于「本地一定能跑」。
+
+### 两次的共同点
+
+现象都是「代码明明改了，结果不对」，但根因都在代码之外。定位顺序应该是：
+
+1. 先确认你跑的是不是你以为的那份代码（文件时间、进程启动时间）
+2. 再确认环境状态（端口、权限、临时目录）
+3. 最后才怀疑逻辑
+
+顺序反过来，就会盯着正确的代码改半天。
